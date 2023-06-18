@@ -34,12 +34,20 @@ int main(int argc, char *argv[])
         DieSysError("Connection failed");
 
     // Main client loop
-    char msg[500];
-    for(;;)
+    char msg[BUFFERSIZE];
+    for (;;)
     {
-        scanf("%s", msg);
-        printf("%s\n", msg);
-        break;
+        uint8_t idMsg = 3;
+        uint8_t idSend = 3;
+        uint8_t idRecv = 3;
+        uint8_t header1 = 0;
+        header1 += (idMsg << 4);
+        header1 += idSend;
+        memset(msg, 0, BUFFERSIZE);
+        msg[0] = header1;
+        msg[1] = (idRecv << 4);
+        size_t strLen = strlen(msg);
+        ssize_t numBytes = send(sock, msg, strLen, 0);
     }
     exit(0);
 }
