@@ -1,17 +1,25 @@
 #include "common.h"
 
 #define MAXPENDING 15
+#define NUM_THREADS 15
 
-int usersSocks[15];
-int usersConn[15];
-uint8_t nextPos;
+typedef struct user_data
+{
+    int usersSocks[NUM_THREADS];
+    int usersConn[NUM_THREADS];
+    pthread_mutex_t writing;
+    pthread_cond_t doneWrite;
+    uint8_t nextPos;
+} user_data;
 
 // Initialize server variables
-void initServer()
+void initServer(user_data *ud)
 {
-    memset(usersSocks, 0, 15);
-    memset(usersConn, 0, 15);
-    nextPos = 0;
+    memset(ud->usersSocks, 0, NUM_THREADS);
+    memset(ud->usersConn, 0, NUM_THREADS);
+    pthread_mutex_init(&ud->writing, NULL);
+    pthread_cond_init(&ud->doneWrite, NULL);
+    ud->nextPos = 0;
 }
 
 // Send error message to client socket
@@ -27,51 +35,62 @@ void sendError(int clntSock, const char errCode[])
 }
 
 // Send message from idSend to idRecv, with code idMsg and content buffer
-int sendMsgTo(uint8_t idSend, uint8_t idRecv, uint8_t idMsg, const char buffer[])
+int sendMsgTo(message_data msg, user_data *ud)
 {
-    char *msg;
-    msg = (char *)calloc(2 + strlen(buffer), sizeof(char));
-    uint8_t header1 = 0, header2 = 0;
-    header1 += (idMsg << 4);
-    header1 += idSend;
-    header2 += (idRecv << 4);
+    char *buffer;
+    buffer = (char *)calloc(3 + strlen(msg.body), sizeof(char));
+
+    uint8_t header1 = 0;
+    header1 += (msg.idMsg << 4);
+    header1 += msg.idSend;
+    buffer[0] = header1;
+    buffer[1] = (msg.idRecv << 4);
+    strcat(buffer, buffer);
+
+    size_t strLen = strlen(buffer);
+    ssize_t bytesSent = send(ud->usersSocks[msg.idRecv], buffer, strLen, 0);
 }
 
 // Iterate through all users connected and send message to all
-void sendMsgAll(uint8_t idSend, uint8_t idMsg, const char buffer[])
+void sendMsgAll(message_data msg, user_data *ud)
 {
-    for (int i = 0; i < 15; i++)
+    for (int i = 0; i < NUM_THREADS; i++)
     {
-        if (usersConn[i] == 1)
-            sendMsgTo(idSend, i, MSG, buffer);
+        if (ud->usersConn[i] == 1)
+            sendMsgTo(msg, ud);
     }
 }
 
 // Adds client to list of clients
-void addClnt(int clntSock)
+int addClnt(int clntSock, user_data *ud)
 {
     // Check if it's full
-    if (nextPos = 15)
-        return sendError(clntSock, "01");
+    pthread_mutex_lock(&ud->writing);
+    if (ud->nextPos == NUM_THREADS)
+        return -1;
+        
+    printf("User %d added\n", (ud->nextPos + 1));
+    ud->usersSocks[ud->nextPos] = clntSock;
+    ud->usersConn[ud->nextPos] = 1;
 
-    printf("User %d added", nextPos + 1);
-    usersSocks[nextPos] = clntSock;
-    usersConn[nextPos] = 1;
-
-    // Broadcast the join message
     char msg[30];
     memset(msg, 0, 30);
     strcat(msg, "User ");
-    sprintf(msg, "%d", nextPos + 1);
+    sprintf(msg, "%d", ud->nextPos + 1);
     strcat(msg, " joined the group!");
-    sendMsgAll(nextPos + 1, MSG, msg);
 
     // Update next available position
-    for (; nextPos < 15; ++nextPos)
+    for (; ud->nextPos < NUM_THREADS; ++ud->nextPos)
     {
-        if (usersConn[nextPos] == 0)
+        if (ud->usersConn[ud->nextPos] == 0)
             break;
     }
+    pthread_mutex_unlock(&ud->writing);
+
+    // Broadcast the join message
+    sendMsgAll(nextPos + 1, MSG, msg);
+
+    return 0;
 }
 
 /*
@@ -94,47 +113,54 @@ void listClnt(const char buffer[])
 {
 }
 
-void handleClient(int clntSock)
+void *handleClient(void *clntSockptr)
 {
     char buffer[BUFFERSIZE];
+    int clntSock = *(int *)clntSockptr;
     ssize_t numBytesRcvd = recv(clntSock, buffer, BUFFERSIZE, 0);
     if (numBytesRcvd < 0)
         DieSysError("Failed to receive message");
+    uint8_t idMsg = 0, idSend, idRecv;
     for (;;)
     {
-        uint8_t idMsg = (buffer[0] >> 4);
-        uint8_t idSend = (buffer[0] & (u_int8_t)15);
-        uint8_t idRecv = (buffer[1] >> 4);
-        printf("IdSend: %d\nIdMsg: %d\nIdRecv: %d\n", idSend, idMsg, idRecv);
-
-        // switch (idMsg)
-        // {
-        // case REQ_ADD:
-        //     addClnt(clntSock);
-        //     break;
-        // case REQ_REM:
-        //     if(remClnt(idSend) < 0)
-        //         sendError(clntSock, "02");
-        //     break;
-        // case MSG:
-        //     if (idRecv == 0)
-        //         sendMsgAll(idSend, MSG, buffer);
-        //     else
-        //     {
-        //         if (sendMsgTo(idSend, idRecv, MSG, buffer) < 0)
-        //             sendError(clntSock, "03");
-        //     }
-        //     break;
-        // default:
-        //     printf("Unknown command id issued - %d\n", idMsg);
-        //     break;
-        // }
+        idMsg = (buffer[0] >> 4);
+        idSend = (buffer[0] & (u_int8_t)NUM_THREADS);
+        idRecv = (buffer[1] >> 4);
+        switch (idMsg)
+        {
+        case REQ_ADD:
+            if (addClnt(clntSock) < 0)
+            {
+                close(clntSock);
+                return 0;
+            }
+        case REQ_REM:
+            if (remClnt(idSend) < 0)
+                sendError(clntSock, "02");
+            break;
+        case MSG:
+            if (idRecv == 0)
+                sendMsgAll(idSend, MSG, buffer);
+            else
+            {
+                if (sendMsgTo(idSend, idRecv, MSG, buffer) < 0)
+                    sendError(clntSock, "03");
+            }
+            break;
+        default:
+            break;
+        }
+        idMsg = 0;
+        idSend = 0;
+        idRecv = 0;
+        memset(buffer, 0, BUFFERSIZE);
     }
 
     close(clntSock);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     // Parse arguments
     if (argc != 3)
         DieUsrError("Invalid number of arguments", "Ipv Port");
@@ -157,7 +183,7 @@ int main(int argc, char *argv[]) {
     }
     else
         DieUsrError("Invalid IP version", "use v4 or v6");
-    
+
     // Open network socket
     servSock = socket(af, SOCK_STREAM, proto);
     if (servSock < 0)
@@ -175,6 +201,10 @@ int main(int argc, char *argv[]) {
     if (listen(servSock, MAXPENDING) < 0)
         DieSysError("Failed to listen on port");
 
+    initServer();
+
+    pthread_t threads[NUM_THREADS];
+    int rc;
     // Main server loop
     for (;;)
     {
@@ -187,9 +217,19 @@ int main(int argc, char *argv[]) {
 
         char clntName[INET_ADDRSTRLEN];
         if (inet_ntop(af, &clntAddr.sin_addr.s_addr, clntName, sizeof(clntName)) != NULL)
-            handleClient(clntSock);
+        {
+            if (nextPos == NUM_THREADS)
+                sendError(clntSock, "01");
+            else
+            {
+                rc = pthread_create(&threads[nextPos], NULL, handleClient, (void *)&clntSock);
+                if (rc)
+                    printf("Failed to create thread\n");
+            }
+        }
         else
             puts("Unable to get client address");
     }
 
+    pthread_exit(NULL);
 }

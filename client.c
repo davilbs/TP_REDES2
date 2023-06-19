@@ -1,4 +1,87 @@
 #include "common.h"
+#define NUM_THREADS 2
+
+// Joins the chat server. Checks for empty spot.
+void join(int sock)
+{
+    // Try to join chat
+    uint8_t idMsg = 0, idSend = 0, idRecv = 0;
+    char msg[BUFFERSIZE];
+    memset(msg, 0, BUFFERSIZE);
+    idMsg = 1;
+    buildHeader(idMsg, idSend, idRecv, msg);
+    size_t strLen = strlen(msg);
+    ssize_t numBytes = send(sock, msg, strLen, 0);
+
+    char buffer[BUFFERSIZE];
+    memset(buffer, 0, BUFFERSIZE);
+    ssize_t numBytesRcvd = recv(sock, buffer, BUFFERSIZE, 0);
+    if (numBytesRcvd < 0)
+        DieSysError("Failed to receive message");
+
+    if (strcmp(buffer, "01") == 0)
+    {
+        printf("User limit exceeded");
+        exit(0);
+    }
+    else
+        printf("%s\n", buffer);
+}
+
+/*
+ Reads commands from command prompt
+ - close connection 
+ - list users
+ - send to IdUser "Message"
+ - send all "Message"
+*/
+void *readCommands(void *sockptr)
+{
+    char *input = NULL, msg[BUFFERSIZE];
+    memset(msg, 0, BUFFERSIZE);
+    int sock = *(int *)sockptr;
+    size_t inputSize;
+    for (;;)
+    {
+        memset(input, 0, strlen(input));
+        if (getline(&input, &inputSize, stdin) < 0)
+            exit(1);
+
+        if (strcmp(input, "close connection") == 0)
+        {
+            sendExit(sock);
+            exit(0);
+        }
+        else if (strcmp(input, "list users") == 0)
+        {
+            buildHeader(4, 0, 0, msg);
+            sendList(sock);
+        }
+        else if (memcmp(input, "send to", strlen("send to")) == 0)
+        {
+            sendMsgTo();
+        }
+        else if (memcmp(input, "send all", strlen("send all")) == 0)
+        {
+            sendMsgAll();
+        }
+    }
+}
+
+void *parseMessages(void *sockptr)
+{
+    int sock = *(int *)sockptr;
+    char buffer[BUFFERSIZE];
+    for (;;)
+    {
+        memset(buffer, 0, BUFFERSIZE);
+        ssize_t numBytesRcvd = recv(sock, buffer, BUFFERSIZE, 0);
+        if (numBytesRcvd < 0)
+            DieSysError("Failed to receive message");
+        else if (numBytesRcvd > 0)
+            printf("%s\n", buffer);
+    }
+}
 
 int main(int argc, char *argv[])
 {
@@ -33,21 +116,21 @@ int main(int argc, char *argv[])
     if (connect(sock, (struct sockaddr *)&servAddr, sizeof(servAddr)) < 0)
         DieSysError("Connection failed");
 
-    // Main client loop
-    char msg[BUFFERSIZE];
-    for (;;)
-    {
-        uint8_t idMsg = 3;
-        uint8_t idSend = 3;
-        uint8_t idRecv = 3;
-        uint8_t header1 = 0;
-        header1 += (idMsg << 4);
-        header1 += idSend;
-        memset(msg, 0, BUFFERSIZE);
-        msg[0] = header1;
-        msg[1] = (idRecv << 4);
-        size_t strLen = strlen(msg);
-        ssize_t numBytes = send(sock, msg, strLen, 0);
-    }
+    // Try to join chat
+    join(sock);
+
+    // Initialize threads
+    pthread_t threads[NUM_THREADS];
+    int rc;
+    rc = pthread_create(&threads[0], NULL, parseMessages, (void *)&sock);
+    if (rc)
+        DieSysError("Failed to create parsing thread");
+
+    rc = pthread_create(&threads[1], NULL, readCommands, (void *)&sock);
+    if (rc)
+        DieSysError("Failed to create parsing thread");
+
+    pthread_exit(NULL);
+    printf("Finished main\n");
     exit(0);
 }
