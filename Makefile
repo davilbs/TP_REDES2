@@ -1,6 +1,6 @@
 build:
-	gcc -o client client.c
+	gcc -o user user.c
 	gcc -o server server.c
 clean:
-	rm client
+	rm user
 	rm server
